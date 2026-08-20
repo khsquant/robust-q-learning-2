@@ -78,6 +78,9 @@ class TrainingState:
   q_optimizer_state: optax.OptState
   q_params: Params
   target_q_params: Params
+  qr_optimizer_state: optax.OptState      # 추가
+  qr_params: Params                       # 추가
+  target_qr_params: Params                # 추가
   gradient_steps: types.UInt64
   env_steps: types.UInt64
   alpha_optimizer_state: optax.OptState
@@ -112,7 +115,7 @@ def _init_training_state(
     gmm_init_state: GMMTrainingState = None,
 ) -> TrainingState:
   """Inits the training state and replicates it over devices."""
-  key_policy, key_q = jax.random.split(key)
+  key_policy, key_q, key_qr = jax.random.split(key, 3)   # split 3개로
   log_alpha = jnp.asarray(0.0, dtype=jnp.float32)
   alpha_optimizer_state = alpha_optimizer.init(log_alpha)
 
@@ -120,6 +123,8 @@ def _init_training_state(
   policy_optimizer_state = policy_optimizer.init(policy_params)
   q_params = sac_network.q_network.init(key_q)
   q_optimizer_state = q_optimizer.init(q_params)
+  qr_params = sac_network.qr_network.init(key_qr)         # 추가
+  qr_optimizer_state = qr_optimizer.init(qr_params)       # 추가
 
   normalizer_params = running_statistics.init_state(
     #   specs.Array((obs_size,), jnp.dtype('float32'))
@@ -131,7 +136,10 @@ def _init_training_state(
       policy_params=policy_params,
       q_optimizer_state=q_optimizer_state,
       q_params=q_params,
+      qr_optimizer_state=qr_optimizer_state,
+      qr_params=qr_params,
       target_q_params=q_params,
+      target_qr_params=qr_params,
       gradient_steps=types.UInt64(hi=0, lo=0),
       env_steps=types.UInt64(hi=0, lo=0),
       alpha_optimizer_state=alpha_optimizer_state,
