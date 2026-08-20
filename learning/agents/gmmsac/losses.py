@@ -200,5 +200,5 @@ def make_losses(
                             num_updates=new_num_updates, sample_db_state=new_sample_db_state,
                             weight_stepsize=gmmvi_state.weight_stepsize)
 
-  return alpha_loss, critic_loss, actor_loss, gmm_update
+  return alpha_loss, critic_loss, actor_loss, return_critic_loss, gmm_update
 
