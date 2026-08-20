@@ -31,7 +31,7 @@ class SACNetworks:
   q_network: networks.FeedForwardNetwork
   parametric_action_distribution: distribution.ParametricDistribution
   gmm_network: networks.FeedForwardNetwork = None
-
+  qr_network: networks.FeedForwardNetwork = None      # 추가: return 전용 critic
 
 def make_inference_fn(sac_networks: SACNetworks):
   """Creates params and inference function for the SAC agent."""
@@ -202,6 +202,14 @@ def make_gmmsac_networks(
       value_obs_key=value_obs_key,
       dr_augmented_critic=dr_augmented_critic,
   )
+  # return 전용 critic (엔트로피 없는 J 추정, 샘플러 energy 전용). 항상 ξ-augmented.
+  qr_network = networks.make_augmented_q_network(
+      observation_size, action_size, param_size or dynamics_param_size,
+      preprocess_observations_fn=preprocess_observations_fn,
+      hidden_layer_sizes=hidden_layer_sizes, activation=activation,
+      layer_norm=q_network_layer_norm, obs_key=value_obs_key,
+  )
+  base = base.replace(qr_network=qr_network)
   init_gmmvi_state, gmm_network = create_gmm_network_and_state(
       dynamics_param_size, num_envs, batch_size, init_key, bound_info=bound_info)
   return base.replace(gmm_network=gmm_network), init_gmmvi_state
