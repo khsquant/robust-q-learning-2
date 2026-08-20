@@ -43,6 +43,7 @@ def make_losses(
   policy_network = sac_network.policy_network
   gmm_network = sac_network.gmm_network
   q_network = sac_network.q_network
+  qr_network = sac_network.qr_network # 추가됨
   parametric_action_distribution = sac_network.parametric_action_distribution
 
   def alpha_loss(
@@ -155,6 +156,29 @@ def make_losses(
     min_q = jnp.min(q_action, axis=-1)
     actor_loss = alpha * log_prob - min_q
     return jnp.mean(actor_loss)
+
+    def return_critic_loss(
+      qr_params, policy_params, normalizer_params, target_qr_params,
+      transitions, key,
+  ):
+    q_old = qr_network.apply(
+        normalizer_params, qr_params,
+        transitions.observation, transitions.action, transitions.dynamics_params)
+    next_dist = policy_network.apply(
+        normalizer_params, policy_params, transitions.next_observation)
+    next_action = parametric_action_distribution.sample_no_postprocessing(next_dist, key)
+    next_action = parametric_action_distribution.postprocess(next_action)
+    next_qr = qr_network.apply(
+        normalizer_params, target_qr_params,
+        transitions.next_observation, next_action, transitions.dynamics_params)
+    next_v = jnp.min(next_qr, axis=-1)                    # ★ 엔트로피 항 없음 = 순수 리턴 J
+    target_qr = jax.lax.stop_gradient(
+        transitions.reward * reward_scaling
+        + transitions.discount * discounting * next_v)
+    qr_error = q_old - jnp.expand_dims(target_qr, -1)
+    truncation = transitions.extras['state_extras']['truncation']
+    qr_error *= jnp.expand_dims(1 - truncation, -1)
+    return 0.5 * jnp.mean(jnp.square(qr_error)), (q_old,)
 
   def gmm_update(gmmvi_state, key):
     samples, mapping, sample_dist_densities, target_lnpdfs, target_lnpdf_grads = \
