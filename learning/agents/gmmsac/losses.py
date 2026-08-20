@@ -157,7 +157,7 @@ def make_losses(
     actor_loss = alpha * log_prob - min_q
     return jnp.mean(actor_loss)
 
-    def return_critic_loss(
+  def return_critic_loss(
       qr_params, policy_params, normalizer_params, target_qr_params,
       transitions, key,
   ):
