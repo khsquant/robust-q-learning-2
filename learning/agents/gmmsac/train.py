@@ -298,7 +298,8 @@ def train(
 
   policy_optimizer = optax.adam(learning_rate=learning_rate)
   q_optimizer = optax.adam(learning_rate=learning_rate)
-
+  qr_optimizer = optax.adam(learning_rate=learning_rate)   # 추가
+  
   dummy_obs = { key: jnp.zeros(obs_shape[key]) for key in obs_shape } if isinstance(obs_shape, dict) else jnp.zeros((obs_shape,))
   print("dummy_obs", dummy_obs)
   dummy_action = jnp.zeros((action_size,))
@@ -320,7 +321,7 @@ def train(
       sample_batch_size=batch_size * grad_updates_per_step // device_count,
   )
 
-  alpha_loss, critic_loss, actor_loss, gmm_update = sac_losses.make_losses(
+  alpha_loss, critic_loss, actor_loss, return_critic_loss, gmm_update = sac_losses.make_losses(
       sac_network=sac_network,
       reward_scaling=reward_scaling,
       discounting=discounting,
@@ -333,6 +334,9 @@ def train(
   critic_update = gradients.gradient_update_fn(  # pytype: disable=wrong-arg-types  # jax-ndarray
       critic_loss, q_optimizer, has_aux=True, pmap_axis_name=_PMAP_AXIS_NAME
   )
+  return_critic_update = gradients.gradient_update_fn(     # 추가
+      return_critic_loss, qr_optimizer, has_aux=True, pmap_axis_name=_PMAP_AXIS_NAME
+  )
   actor_update = gradients.gradient_update_fn(  # pytype: disable=wrong-arg-types  # jax-ndarray
       actor_loss, policy_optimizer, pmap_axis_name=_PMAP_AXIS_NAME
   )
@@ -342,7 +346,7 @@ def train(
   ) -> Tuple[Tuple[TrainingState, PRNGKey], Metrics]:
     training_state, key = carry
 
-    key, key_alpha, key_critic, key_actor = jax.random.split(key, 4)
+    key, key_alpha, key_critic, key_actor, key_rcritic = jax.random.split(key, 5) # key_rcritic 추가
 
     alpha_loss, alpha_params, alpha_optimizer_state = alpha_update(
         training_state.alpha_params,
@@ -363,6 +367,20 @@ def train(
         key_critic,
         optimizer_state=training_state.q_optimizer_state,
     )
+    # 추가
+    (rcritic_loss, _), qr_params, qr_optimizer_state = return_critic_update(
+        training_state.qr_params,
+        training_state.policy_params,
+        training_state.normalizer_params,
+        training_state.target_qr_params,
+        transitions,
+        key_rcritic,
+        optimizer_state=training_state.qr_optimizer_state,
+    )
+    new_target_qr_params = jax.tree_util.tree_map(
+        lambda x, y: x * (1 - tau) + y * tau, training_state.target_qr_params, qr_params
+    )
+    
     actor_loss, policy_params, policy_optimizer_state = actor_update(
         training_state.policy_params,
         training_state.normalizer_params,
@@ -381,6 +399,7 @@ def train(
 
     metrics = {
         'critic_loss': critic_loss,
+        'rcritic_loss': rcritic_loss,
         'actor_loss': actor_loss,
         'alpha_loss': alpha_loss,
         'alpha': jnp.exp(alpha_params),
@@ -398,6 +417,9 @@ def train(
         q_optimizer_state=q_optimizer_state,
         q_params=q_params,
         target_q_params=new_target_q_params,
+        qr_optimizer_state=qr_optimizer_state,
+        qr_params=qr_params,
+        target_qr_params=new_target_qr_params,
         gradient_steps=training_state.gradient_steps + 1,
         env_steps=training_state.env_steps,
         alpha_optimizer_state=alpha_optimizer_state,
@@ -407,7 +429,7 @@ def train(
     )
     return (new_training_state, key), metrics
   def adv_step(
-      env, env_state, policy, normalizer_params, q_params, dynamics_params, key,
+      env, env_state, policy, normalizer_params, qr_params, dynamics_params, key, # q_params -> qr_params
       extra_fields=(),
     ):
       act_key, key = jax.random.split(key)
@@ -418,12 +440,14 @@ def train(
       nstate = env.step(env_state, actions, xi_env)
       #nstate = env.step(env_state, actions, dynamics_params)
       state_extras = {x: nstate.info[x] for x in extra_fields}
-      if dr_augmented_critic:
-        q_values = sac_network.q_network.apply(
-            normalizer_params, q_params, env_state.obs, actions, dynamics_params).mean(-1)
-      else:
-        q_values = sac_network.q_network.apply(
-            normalizer_params, q_params, env_state.obs, actions).mean(-1)
+      #if dr_augmented_critic:
+      #  q_values = sac_network.q_network.apply(
+      #      normalizer_params, q_params, env_state.obs, actions, dynamics_params).mean(-1)
+      #else:
+      #  q_values = sac_network.q_network.apply(
+      #      normalizer_params, q_params, env_state.obs, actions).mean(-1)
+      q_values = sac_network.qr_network.apply(
+          normalizer_params, qr_params, env_state.obs, actions, dynamics_params).mean(-1)
       target_lnpdf = beta * q_values / 100
       return nstate, TransitionwithParams(
           observation=env_state.obs,
@@ -439,12 +463,12 @@ def train(
           extras={'policy_extras': policy_extras, 'state_extras': state_extras})
 
   def get_experience(
-      normalizer_params, policy_params, q_params, dynamics_params,
+      normalizer_params, policy_params, qr_params, dynamics_params, # q_params -> qr_params
       env_state, buffer_state, key,
   ):
     policy = make_policy((normalizer_params, policy_params))
     env_state, transitions = adv_step(
-        env, env_state, policy, normalizer_params, q_params, dynamics_params, key,
+        env, env_state, policy, normalizer_params, qr_params, dynamics_params, key,  # q_params -> qr_params
         extra_fields=('truncation',))
     normalizer_params = running_statistics.update(
         normalizer_params, transitions.observation, pmap_axis_name=_PMAP_AXIS_NAME)
@@ -465,7 +489,7 @@ def train(
         training_state.gmm_training_state.model_state, param_key)
     normalizer_params, env_state, buffer_state, simul_info, simul_transitions = get_experience(
         training_state.normalizer_params, training_state.policy_params,
-        training_state.q_params, sampled_params, env_state, buffer_state, experience_key)
+        training_state.qr_params, sampled_params, env_state, buffer_state, experience_key) # 수정됨
     new_sample_db_state = sac_network.gmm_network.sample_selector.save_samples(
         training_state.gmm_training_state.model_state,
         training_state.gmm_training_state.sample_db_state,
@@ -499,7 +523,7 @@ def train(
           training_state.gmm_training_state.model_state, param_key)
       new_normalizer_params, env_state, buffer_state, _, simul_transitions = get_experience(
           training_state.normalizer_params, training_state.policy_params,
-          training_state.q_params, sampled_params, env_state, buffer_state, key)
+          training_state.qr_params, sampled_params, env_state, buffer_state, key) # 수정됨
       new_sample_db_state = sac_network.gmm_network.sample_selector.save_samples(
           training_state.gmm_training_state.model_state,
           training_state.gmm_training_state.sample_db_state,
@@ -594,6 +618,7 @@ def train(
       alpha_optimizer=alpha_optimizer,
       policy_optimizer=policy_optimizer,
       q_optimizer=q_optimizer,
+      qr_optimizer=qr_optimizer,
       gmm_init_state=gmm_init_state,
   )
   del global_key
