@@ -112,6 +112,7 @@ def _init_training_state(
     alpha_optimizer: optax.GradientTransformation,
     policy_optimizer: optax.GradientTransformation,
     q_optimizer: optax.GradientTransformation,
+    qr_optimizer: optax.GradientTransformation,      # 추가
     gmm_init_state: GMMTrainingState = None,
 ) -> TrainingState:
   """Inits the training state and replicates it over devices."""
